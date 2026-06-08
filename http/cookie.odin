@@ -108,7 +108,8 @@ cookie_parse :: proc(value: string, allocator := context.allocator) -> (cookie: 
 		ok = true
 		return
 	case 0:
-		return
+		cookie.value = ""
+		value = value[1:]
 	case:
 		cookie.value = value[:semi]
 		value = value[semi + 1:]
