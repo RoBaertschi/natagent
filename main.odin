@@ -1,0 +1,4 @@
+package natagent
+
+main :: proc() {}
+
