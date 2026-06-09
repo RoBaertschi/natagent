@@ -159,6 +159,141 @@ openai_codex_token_load :: proc(allocator: runtime.Allocator) -> (t: Openai_Code
     return
 }
 
+OPENAI_CODEX_CLIENT_ID :: "app_EMoamEEZ73f0CkXaXp7hrann"
+OPENAI_CODEX_ISSUER    :: "https://auth.openai.com"
+OPENAI_CODEX_PORT      :: 1455
+OPENAI_CODEX_CALLBACK  :: "http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+
+openai_codex_request_oauth_token :: proc(
+    allocator: runtime.Allocator,
+    format: string,
+    args: ..any
+) -> (token: Openai_Codex_Token, ok: bool) {
+
+    temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+    r: client.Request
+    client.request_init(&r, .Post, temp)
+
+    r_w := bytes.buffer_to_stream(&r.body)
+
+    r_body := fmt.wprintf(r_w,
+        format,
+        ..args,
+    )
+
+    http.headers_set(&r.headers, "Content-Type", "application/x-www-form-urlencoded")
+
+    url := OPENAI_CODEX_ISSUER + "/oauth/token"
+    log.debugf("requesting %q", url)
+
+    res, res_err := client.request(&r, url, temp)
+    if res_err != nil {
+        log.errorf("could not request token: %v", res_err)
+        return
+    }
+
+    body, _, body_err := client.response_body(&res, allocator = temp)
+    if body_err != nil {
+        log.errorf("could not read body of token request: %v", body_err)
+        return
+    }
+
+    body_text: string
+
+    switch b in body {
+    case client.Body_Plain:
+        body_text = b
+    case client.Body_Url_Encoded:
+        log.errorf("unexpected url encoded body from token request")
+        return
+    case client.Body_Error:
+        log.errorf("could not read body of token request: %v", b)
+        return
+    }
+
+    Token :: struct {
+        id_token:      string,
+        access_token:  string,
+        refresh_token: string,
+        expires_in:    time.Duration,
+    }
+
+
+    t: Token
+    unmarshal_err := json.unmarshal(transmute([]byte)body_text, &t, allocator =  temp)
+    if unmarshal_err != nil {
+        log.errorf("could not parse body of token request: %v", unmarshal_err)
+        return
+    }
+
+    t.expires_in *= time.Second
+
+    extract_chatgpt_account_id :: proc(jwt: string, allocator: runtime.Allocator) -> (id: string, ok: bool) {
+        jwt := jwt
+        temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+        // first part
+        _ = strings.split_iterator(&jwt, ".") or_return
+        second := strings.split_iterator(&jwt, ".") or_return
+        result, err := base64.decode(second, base64.DEC_URL_TABLE, allocator = temp)
+        if err != nil {
+            log.debugf("could not decode base64url in jwt token: %v", err)
+            return
+        }
+
+        m: json.Object
+        json_err := json.unmarshal(result, &m, allocator = temp)
+        if json_err != nil {
+            log.debugf("could not unmarshal jwt token: %v", json_err)
+            return
+        }
+
+        account_id := m["chatgpt_account_id"]
+        if id, ok = account_id.(json.String); ok {
+            id = strings.clone(id, allocator)
+            return
+        }
+
+        url_path := m["https://api.openai.com/auth"]
+        if url_path_object, url_path_object_ok := url_path.(json.Object); url_path_object_ok {
+            url_account_id := url_path_object["chatgpt_account_id"]
+            if id, ok = url_account_id.(json.String); ok {
+                id = strings.clone(id, allocator)
+                return
+            }
+        }
+
+        orgs := m["organizations"]
+        if orgs_array, orgs_array_ok := orgs.(json.Array); orgs_array_ok {
+            if len(orgs_array) > 0 {
+                org := orgs_array[0]
+                if org_object, org_object_ok := org.(json.Object); org_object_ok {
+                    org_id := org_object["id"]
+                    if id, ok = org_id.(json.String); ok {
+                        id = strings.clone(id, allocator)
+                        return
+                    }
+                }
+            }
+        }
+
+        return
+    }
+
+    token = {
+        id_token           = strings.clone(t.id_token, allocator),
+        access_token       = strings.clone(t.access_token, allocator),
+        refresh_token      = strings.clone(t.refresh_token, allocator),
+        chatgpt_account_id = extract_chatgpt_account_id(t.id_token, allocator)     or_else (
+                              extract_chatgpt_account_id(t.access_token, allocator) or_else
+                              ""),
+        expires_in         = time.time_add(time.now(), t.expires_in - time.Minute * 2),
+    }
+    ok = true
+    return
+}
+
 openai_codex_login :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex_Token, ok: bool) {
     log.info("not logged in, logging in")
 
@@ -187,12 +322,7 @@ openai_codex_login :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex
 
     url_save_random(_openai_codex_login_state.state[:])
 
-    CLIENT_ID :: "app_EMoamEEZ73f0CkXaXp7hrann"
-    ISSUER    :: "https://auth.openai.com"
-    PORT      :: 1455
-    CALLBACK  :: "http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
-
-    url := fmt.aprintf(ISSUER + "/oauth/authorize?response_type=code&client_id=" + CLIENT_ID + "&redirect_uri=%s&scope=openid+profile+email+offline_access&code_challenge=%s&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=%s&originator=natagent", CALLBACK, code_challange, _openai_codex_login_state.state, allocator = temp)
+    url := fmt.aprintf(OPENAI_CODEX_ISSUER + "/oauth/authorize?response_type=code&client_id=" + OPENAI_CODEX_CLIENT_ID + "&redirect_uri=%s&scope=openid+profile+email+offline_access&code_challenge=%s&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=%s&originator=natagent", OPENAI_CODEX_CALLBACK, code_challange, _openai_codex_login_state.state, allocator = temp)
     run("xdg-open", url)
     log.debugf("opening %s", url)
 
@@ -265,7 +395,7 @@ openai_codex_login :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex
     http.listen_and_serve(
         &_openai_codex_login_state.server,
         http.router_handler(&router),
-        { address = net.IP4_Any, port = PORT },
+        { address = net.IP4_Any, port = OPENAI_CODEX_PORT },
         {
             auto_expect_continue = true,
             limit_headers        = 8000,
@@ -279,130 +409,23 @@ openai_codex_login :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex
         return
     }
 
-    r: client.Request
-    client.request_init(&r, .Post, temp)
-
-    r_w := bytes.buffer_to_stream(&r.body)
-
-    r_body := fmt.wprintf(r_w,
-        "grant_type=authorization_code&code=%s&redirect_uri=%s&client_id=" +
-            CLIENT_ID +
-            "&code_verifier=%s",
+    return openai_codex_request_oauth_token(
+        allocator,
+        "grant_type=authorization_code&code=%s&redirect_uri=%s&client_id=%s&code_verifier=%s",
         _openai_codex_login_state.code,
-        CALLBACK,
+        OPENAI_CODEX_CALLBACK,
+        OPENAI_CODEX_CLIENT_ID,
         code_verifier,
     )
+}
 
-    http.headers_set(&r.headers, "Content-Type", "application/x-www-form-urlencoded")
-
-    url = "https://auth.openai.com/oauth/token"
-    log.debugf("requesting %q", url)
-
-    res, res_err := client.request(&r, url, temp)
-    if res_err != nil {
-        log.errorf("could not request token: %v", res_err)
-        return
-    }
-
-    body, _, body_err := client.response_body(&res, allocator = temp)
-    if body_err != nil {
-        log.errorf("could not read body of token request: %v", body_err)
-        return
-    }
-
-    body_text: string
-
-    switch b in body {
-    case client.Body_Plain:
-        body_text = b
-    case client.Body_Url_Encoded:
-        log.errorf("unexpected url encoded body from token request")
-        return
-    case client.Body_Error:
-        log.errorf("could not read body of token request: %v", b)
-        return
-    }
-
-    Token :: struct {
-        id_token:      string,
-        access_token:  string,
-        refresh_token: string,
-        expires_in:    time.Duration,
-    }
-
-
-    t: Token
-    unmarshal_err := json.unmarshal(transmute([]byte)body_text, &t, allocator =  temp)
-    if unmarshal_err != nil {
-        log.errorf("could not parse body of token request: %v", unmarshal_err)
-        return
-    }
-
-    t.expires_in *= time.Second
-
-    extract_chatgpt_account_id :: proc(jwt: string, allocator: runtime.Allocator) -> (id: string, ok: bool) {
-        jwt := jwt
-        a := TEMP_ALLOCATOR_GUARD(allocator)
-
-        // first part
-        _ = strings.split_iterator(&jwt, ".") or_return
-        second := strings.split_iterator(&jwt, ".") or_return
-        result, err := base64.decode(second, base64.DEC_URL_TABLE, allocator = a)
-        if err != nil {
-            log.debugf("could not decode base64url in jwt token: %v", err)
-            return
-        }
-
-        m: json.Object
-        json_err := json.unmarshal(result, &m, allocator = a)
-        if json_err != nil {
-            log.debugf("could not unmarshal jwt token: %v", json_err)
-            return
-        }
-
-        account_id := m["chatgpt_account_id"]
-        if id, ok = account_id.(json.String); ok {
-            id = strings.clone(id, allocator)
-            return
-        }
-
-        url_path := m["https://api.openai.com/auth"]
-        if url_path_object, url_path_object_ok := url_path.(json.Object); url_path_object_ok {
-            url_account_id := url_path_object["chatgpt_account_id"]
-            if id, ok = url_account_id.(json.String); ok {
-                id = strings.clone(id, allocator)
-                return
-            }
-        }
-
-        orgs := m["organizations"]
-        if orgs_array, orgs_array_ok := orgs.(json.Array); orgs_array_ok {
-            if len(orgs_array) > 0 {
-                org := orgs_array[0]
-                if org_object, org_object_ok := org.(json.Object); org_object_ok {
-                    org_id := org_object["id"]
-                    if id, ok = org_id.(json.String); ok {
-                        id = strings.clone(id, allocator)
-                        return
-                    }
-                }
-            }
-        }
-
-        return
-    }
-
-    token = {
-        id_token           = strings.clone(t.id_token, allocator),
-        access_token       = strings.clone(t.access_token, allocator),
-        refresh_token      = strings.clone(t.refresh_token, allocator),
-        chatgpt_account_id = extract_chatgpt_account_id(t.id_token, allocator)     or_else (
-                              extract_chatgpt_account_id(t.access_token, allocator) or_else
-                              ""),
-        expires_in         = time.time_add(time.now(), t.expires_in - time.Minute * 2),
-    }
-    ok = true
-    return
+openai_codex_token_refresh :: proc(token: Openai_Codex_Token, allocator: runtime.Allocator) -> (Openai_Codex_Token, bool) {
+    return openai_codex_request_oauth_token(
+        allocator,
+        "grant_type=refresh_token&refresh_token=%s&client_id=%s",
+        token.refresh_token,
+        OPENAI_CODEX_CLIENT_ID,
+    )
 }
 
 openai_codex_token_get :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex_Token, ok: bool) {
@@ -410,7 +433,7 @@ openai_codex_token_get :: proc(allocator: runtime.Allocator) -> (token: Openai_C
     token  = openai_codex_token_load(temp)
 
     if time.time_to_unix_nano(
-        time.time_add(token.expires_in, time.Minute * 5)) < time.time_to_unix_nano(time.now()) {
+        time.time_add(token.expires_in, -time.Minute * 5)) < time.time_to_unix_nano(time.now()) {
 
         if token.refresh_token == "" {
             token, ok = openai_codex_login(allocator)
@@ -421,8 +444,23 @@ openai_codex_token_get :: proc(allocator: runtime.Allocator) -> (token: Openai_C
 
             openai_codex_token_save(token)
         } else {
-            unimplemented("TODO: implement token refresh")
+            log.info("token about to expire, refreshing...")
+            token, ok = openai_codex_token_refresh(token, allocator)
+            if !ok {
+                log.error("could not refresh token")
+            } else {
+                openai_codex_token_save(token)
+            }
+            return
         }
+    }
+
+    token = {
+        id_token           = strings.clone(token.id_token, allocator),
+        refresh_token      = strings.clone(token.refresh_token, allocator),
+        access_token       = strings.clone(token.access_token, allocator),
+        chatgpt_account_id = strings.clone(token.chatgpt_account_id, allocator),
+        expires_in         = token.expires_in,
     }
 
     ok = true
