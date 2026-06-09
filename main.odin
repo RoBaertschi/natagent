@@ -61,7 +61,13 @@ main :: proc() {
     http.headers_set(&h, "originator", "natagent")
     http.headers_set(&h, "User-Agent", "natagent/0.1")
 
-    response_create(&h, "https://chatgpt.com/backend-api/codex/responses")
+    session_id := session_id_create(temp)
+    response_create(&h, "https://chatgpt.com/backend-api/codex/responses", session_id, {
+        model        = "gpt-5.5",
+        input        = {{ role = "user", content = "Say Hi" }},
+        instructions = "You are a professional Hi sayer.",
+        store        = false,
+    })
 }
 
 

@@ -1,6 +1,7 @@
 #+vet explicit-allocators
 package natagent
 
+import "core:encoding/json"
 import "base:runtime"
 
 import "core:log"
@@ -29,11 +30,11 @@ Response_Request :: struct {
 }
 
 Response_User_Message_Item_Param :: struct {
-    id:      string, // optional
-    type:    string,
+    id:      string `json:",omitempty"`, // optional
+    type:    string `json:",omitempty"`,
     role:    string, // "user"
     content: string,
-    status:  string, // optional
+    status:  string `json:",omitempty"`, // optional
 }
 
 session_id_create :: proc(allocator: runtime.Allocator) -> string {
@@ -66,7 +67,7 @@ response_create :: proc(auth: ^http.Headers, url: string, session_id: string, in
     log.debugf("headers: %v", r.headers)
 
     r_w := bytes.buffer_to_stream(&r.body)
-    fmt.wprintf(r_w, `{{"model": "gpt-5.5", "input": [{{ "type": "message", "role": "user", "content": "Say hi" }], "instructions": "You are a proffessional Hi-Sayer", "store": false, "stream": true, "prompt_cache_key": %q}`, session_id)
+    assert(json.marshal_to_writer(r_w, request, &{}) == nil)
 
     response, err := client.request(&r, url, temp)
     fmt.println(response, err)
