@@ -1,11 +1,11 @@
 #+vet explicit-allocators
 package natagent
 
+import "core:path/filepath"
 import "core:bytes"
 import "core:encoding/json"
 import "core:strings"
 import "core:crypto/sha2"
-import "core:hash"
 import "core:encoding/base64"
 import "core:fmt"
 import "core:time"
@@ -18,6 +18,28 @@ import "core:math/rand"
 import "core:crypto"
 import "http"
 import "http/client"
+
+config_home :: proc(allocator: runtime.Allocator) -> string {
+    config_home := os.get_env("XDG_CONFIG_HOME", allocator)
+    if config_home == "" {
+        temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+        home := os.user_home_dir(temp) or_else "~"
+        return filepath.join({ home, ".config" }, allocator) or_else "~/.config"
+    }
+    return config_home
+}
+
+data_home :: proc(allocator: runtime.Allocator) -> string {
+    data_home := os.get_env("XDG_DATA_HOME", allocator)
+    if data_home == "" {
+        temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+        home := os.user_home_dir(temp) or_else "~"
+        return filepath.join({ home, ".local", "share" }, allocator) or_else "~/.local/share"
+    }
+    return data_home
+}
 
 run :: proc(args: ..string) -> (state: os.Process_State, err: os.Error) {
     allocator := TEMP_ALLOCATOR_GUARD()
@@ -71,12 +93,79 @@ url_save_random :: proc(data: []byte) {
     }
 }
 
-openai_codex_login :: proc() -> bool {
+Openai_Codex_Token :: struct {
+    id_token:           string,
+    access_token:       string,
+    refresh_token:      string,
+    expires_in:         time.Time,
+    chatgpt_account_id: string,
+}
+
+CONFIG_SUBDIR :: "natagent"
+CONFIG_AUTH   :: "auth.json"
+
+config_auth_path :: proc(allocator: runtime.Allocator) -> string {
+    temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+    config        := config_home(temp)
+    config_subdir := filepath.join({ config, CONFIG_SUBDIR }, temp) or_else "~/.config/" + CONFIG_SUBDIR
+
+    os.mkdir_all(config_subdir)
+
+    config_auth := filepath.join({ config_subdir, CONFIG_AUTH }, allocator) or_else "~/.config/" + CONFIG_SUBDIR + "/" + CONFIG_AUTH
+
+    return config_auth
+}
+
+openai_codex_token_save :: proc(t: Openai_Codex_Token) {
+    temp := TEMP_ALLOCATOR_GUARD()
+
+    config_auth := config_auth_path(temp)
+    f, os_err := os.create(config_auth)
+    if os_err != nil {
+        log.errorf("could not create auth config: %v", os_err)
+        return
+    }
+    defer os.close(f)
+
+    f_stream := os.to_stream(f)
+    json_err := json.marshal_to_writer(f_stream, t, &{ pretty = true, use_spaces = true, spec = .JSON })
+    if json_err != nil {
+        log.errorf("could not serialize json into %q: %v", config_auth, json_err)
+        return
+    }
+}
+
+openai_codex_token_load :: proc(allocator: runtime.Allocator) -> (t: Openai_Codex_Token) {
+    temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+    config_auth := config_auth_path(temp)
+    data, os_err := os.read_entire_file(config_auth, temp)
+
+    switch os_err {
+    case .Not_Exist:
+        return
+    case:
+        log.errorf("could not read auth config %q: %v", config_auth, os_err)
+        return
+    case nil:
+    }
+
+    json_err := json.unmarshal(data, &t, allocator = allocator)
+    if json_err != nil {
+        log.errorf("could not deserialize auth config %q: %v", config_auth, os_err)
+        return
+    }
+    return
+}
+
+openai_codex_login :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex_Token, ok: bool) {
+    log.info("not logged in, logging in")
 
     ensure(sync.try_lock(&_openai_codex_login_state.mu), "INVALID STATE: openai codex login state called while already locked")
     defer sync.unlock(&_openai_codex_login_state.mu)
 
-    allocator := TEMP_ALLOCATOR_GUARD()
+    temp := TEMP_ALLOCATOR_GUARD(allocator)
 
     _openai_codex_login_state.server = {}
     _openai_codex_login_state.success = false
@@ -91,7 +180,7 @@ openai_codex_login :: proc() -> bool {
     sha2.update(&hash_ctx, code_verifier[:])
     sha2.final(&hash_ctx, code_verifier_hash[:])
 
-    code_challange := base64.encode(code_verifier_hash[:], base64.ENC_URL_TABLE, allocator)
+    code_challange := base64.encode(code_verifier_hash[:], base64.ENC_URL_TABLE, temp)
 
     first_padding := strings.index(code_challange, "=")
     code_challange = code_challange[:first_padding if first_padding != -1 else len(code_challange)]
@@ -103,24 +192,24 @@ openai_codex_login :: proc() -> bool {
     PORT      :: 1455
     CALLBACK  :: "http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
 
-    url := fmt.aprintf(ISSUER + "/oauth/authorize?response_type=code&client_id=" + CLIENT_ID + "&redirect_uri=%s&scope=openid+profile+email+offline_access&code_challenge=%s&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=%s&originator=natagent", CALLBACK, code_challange, _openai_codex_login_state.state, allocator = allocator)
+    url := fmt.aprintf(ISSUER + "/oauth/authorize?response_type=code&client_id=" + CLIENT_ID + "&redirect_uri=%s&scope=openid+profile+email+offline_access&code_challenge=%s&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=%s&originator=natagent", CALLBACK, code_challange, _openai_codex_login_state.state, allocator = temp)
     run("xdg-open", url)
     log.debugf("opening %s", url)
 
     http.server_shutdown_on_interrupt(&_openai_codex_login_state.server)
 
     router: http.Router
-    http.router_init(&router, allocator)
+    http.router_init(&router, temp)
     defer http.router_destroy(&router)
 
     err := nbio.acquire_thread_event_loop()
     if err != nil {
         log.errorf("could not optain thread event loop: %v", err)
-        return false
+        return
     }
     defer nbio.release_thread_event_loop()
 
-    _openai_codex_login_state.timeout = nbio.timeout(/* time.Minute * 5 */ time.Second * 20, proc(_op: ^nbio.Operation) {
+    _openai_codex_login_state.timeout = nbio.timeout(time.Minute * 5, proc(_op: ^nbio.Operation) {
         if _openai_codex_login_state.success {
             return
         }
@@ -187,18 +276,11 @@ openai_codex_login :: proc() -> bool {
     )
 
     if !_openai_codex_login_state.success {
-        return false
-    }
-
-    Token :: struct {
-        id_token:      string,
-        access_token:  string,
-        refresh_token: string,
-        expires_in:    time.Duration,
+        return
     }
 
     r: client.Request
-    client.request_init(&r, .Post, allocator)
+    client.request_init(&r, .Post, temp)
 
     r_w := bytes.buffer_to_stream(&r.body)
 
@@ -216,16 +298,16 @@ openai_codex_login :: proc() -> bool {
     url = "https://auth.openai.com/oauth/token"
     log.debugf("requesting %q", url)
 
-    res, res_err := client.request(&r, url, allocator)
+    res, res_err := client.request(&r, url, temp)
     if res_err != nil {
         log.errorf("could not request token: %v", res_err)
-        return false
+        return
     }
 
-    body, _, body_err := client.response_body(&res, allocator = allocator)
+    body, _, body_err := client.response_body(&res, allocator = temp)
     if body_err != nil {
         log.errorf("could not read body of token request: %v", body_err)
-        return false
+        return
     }
 
     body_text: string
@@ -235,22 +317,28 @@ openai_codex_login :: proc() -> bool {
         body_text = b
     case client.Body_Url_Encoded:
         log.errorf("unexpected url encoded body from token request")
-        return false
+        return
     case client.Body_Error:
         log.errorf("could not read body of token request: %v", b)
-        return false
+        return
     }
 
+    Token :: struct {
+        id_token:      string,
+        access_token:  string,
+        refresh_token: string,
+        expires_in:    time.Duration,
+    }
+
+
     t: Token
-    unmarshal_err := json.unmarshal(transmute([]byte)body_text, &t, allocator =  allocator)
+    unmarshal_err := json.unmarshal(transmute([]byte)body_text, &t, allocator =  temp)
     if unmarshal_err != nil {
         log.errorf("could not parse body of token request: %v", unmarshal_err)
-        return false
+        return
     }
 
     t.expires_in *= time.Second
-
-    log.debugf("got token: %#v", t)
 
     extract_chatgpt_account_id :: proc(jwt: string, allocator: runtime.Allocator) -> (id: string, ok: bool) {
         jwt := jwt
@@ -274,6 +362,7 @@ openai_codex_login :: proc() -> bool {
 
         account_id := m["chatgpt_account_id"]
         if id, ok = account_id.(json.String); ok {
+            id = strings.clone(id, allocator)
             return
         }
 
@@ -281,6 +370,7 @@ openai_codex_login :: proc() -> bool {
         if url_path_object, url_path_object_ok := url_path.(json.Object); url_path_object_ok {
             url_account_id := url_path_object["chatgpt_account_id"]
             if id, ok = url_account_id.(json.String); ok {
+                id = strings.clone(id, allocator)
                 return
             }
         }
@@ -292,6 +382,7 @@ openai_codex_login :: proc() -> bool {
                 if org_object, org_object_ok := org.(json.Object); org_object_ok {
                     org_id := org_object["id"]
                     if id, ok = org_id.(json.String); ok {
+                        id = strings.clone(id, allocator)
                         return
                     }
                 }
@@ -301,17 +392,51 @@ openai_codex_login :: proc() -> bool {
         return
     }
 
-    log.debugf("chatgpt account id:")
-    log.debugf("  -> id_token: %v(ok: %v)", extract_chatgpt_account_id(t.id_token, allocator))
-    log.debugf("  -> access_token: %v(ok: %v)", extract_chatgpt_account_id(t.access_token, allocator))
+    token = {
+        id_token           = strings.clone(t.id_token, allocator),
+        access_token       = strings.clone(t.access_token, allocator),
+        refresh_token      = strings.clone(t.refresh_token, allocator),
+        chatgpt_account_id = extract_chatgpt_account_id(t.id_token, allocator)     or_else (
+                              extract_chatgpt_account_id(t.access_token, allocator) or_else
+                              ""),
+        expires_in         = time.time_add(time.now(), t.expires_in - time.Minute * 2),
+    }
+    ok = true
+    return
+}
 
-    return true
+openai_codex_token_get :: proc(allocator: runtime.Allocator) -> (token: Openai_Codex_Token, ok: bool) {
+    temp  := TEMP_ALLOCATOR_GUARD(allocator)
+    token  = openai_codex_token_load(temp)
+
+    if time.time_to_unix_nano(
+        time.time_add(token.expires_in, time.Minute * 5)) < time.time_to_unix_nano(time.now()) {
+
+        if token.refresh_token == "" {
+            token, ok = openai_codex_login(allocator)
+            if !ok {
+                log.errorf("could not log into codex")
+                return
+            }
+
+            openai_codex_token_save(token)
+        } else {
+            unimplemented("TODO: implement token refresh")
+        }
+    }
+
+    ok = true
+    return
 }
 
 main :: proc() {
     context.logger = log.create_console_logger(allocator = context.allocator)
 
-    assert(openai_codex_login())
+    temp := TEMP_ALLOCATOR_GUARD()
+
+    token, ok := openai_codex_token_get(temp)
+    log.info(token, ok)
+    assert(ok)
 
     log.infof("hi %s", [?]byte{ 'a', 'b' })
 }
