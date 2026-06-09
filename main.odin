@@ -435,10 +435,7 @@ main :: proc() {
     temp := TEMP_ALLOCATOR_GUARD()
 
     token, ok := openai_codex_token_get(temp)
-    log.info(token, ok)
     assert(ok)
-
-    log.infof("hi %s", [?]byte{ 'a', 'b' })
 }
 
 
