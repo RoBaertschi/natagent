@@ -220,6 +220,30 @@ _sse_update_buffer :: proc(r: ^SSE_Reader($B)) -> (read: int, err: io.Error) {
     return
 }
 
+/*
+Progresses the current `SSE_Reader` with the provided WIP `event`.
+
+Inputs:
+- r: a valid `SSE_Reader`
+- event: a in-out pointer to a WIP event
+- allocator: allocator to allocate the fields inside event with
+
+**Usage**
+- the passed in event is used to stream the current event into
+- true is returned when said event is dispatched and ready to be used
+- said event must be reset manually by the user
+- it is recommended to copy the contents of the event out of the event itself and reset it for reuse
+
+WARN: The passed in events field are allocated with `allocator`, as long as you intend to
+      use this function, those fields should not be freed, ideally you wait until an event
+      is dispatched, copy the fields out into a more permanent allocator and then reset `allocator`
+
+NOTE: `event.data` will always end with an `\n`, if you don't want that, strip it off
+
+Returns:
+- `bool` is true, if the event is dispatched (finished) and ready to use
+- `SSE_Error` unrecoverable error, either an `io.Error` or `SSE_General_Error.Invalid_Utf8`
+*/
 sse_progress :: proc(r: ^SSE_Reader($B), event: ^SSE_Event, allocator: runtime.Allocator) -> (bool, SSE_Error) {
     assert(r != nil)
     assert(event != nil)
