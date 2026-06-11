@@ -74,11 +74,17 @@ SSE_Error :: union #shared_nil {
 test :: proc() {
     r: SSE_Reader(128)
     _, _ = _sse_consume_next_line(&r, context.allocator)
-    sse_next_event(&r, context.allocator)
+    sse_progress(&r, nil, context.allocator)
     _sse_update_buffer(&r)
 }
 
 // https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+_sse_buffer_is_full :: proc(r: ^SSE_Reader($B)) -> bool {
+    assert(r != nil)
+
+    return B - r.buffer_len <= 0
+}
 
 /*
 Reads the next line in the SSE_Reader.
@@ -187,17 +193,14 @@ Read from `r.reader` and fill the buffer as far as possible
 Inputs:
 - r: A valid reader
 
-NOTE: `io.Error.Buffer_Full` should be handled specially,
-      because it can mean both that the `r.reader` buffer is full (which does not make sense)
-      or `r` itself is full
 NOTE: An error does not indicate that the buffer was not updated,
       some errors might be temporary and some data was still read
 
 Returns:
-- err: an error indicating the success of the read, can be `io.Error.Buffer_Full` if the buffer is already full
+- err: an error indicating the success of the read
 - read: the amount of new bytes read, can also be `> 0` when `err != nil`
 */
-_sse_update_buffer :: proc(r: ^SSE_Reader($B)) -> (read: int, err: SSE_Error) {
+_sse_update_buffer :: proc(r: ^SSE_Reader($B)) -> (read: int, err: io.Error) {
     assert(r != nil)
 
     defer {
@@ -205,8 +208,7 @@ _sse_update_buffer :: proc(r: ^SSE_Reader($B)) -> (read: int, err: SSE_Error) {
         assert(r.buffer_len <= B)
     }
 
-    if B - r.buffer_len <= 0 {
-        err = .Buffer_Full
+    if _sse_buffer_is_full(r) {
         return
     }
 
@@ -216,6 +218,86 @@ _sse_update_buffer :: proc(r: ^SSE_Reader($B)) -> (read: int, err: SSE_Error) {
     }
 
     return
+}
+
+sse_progress :: proc(r: ^SSE_Reader($B), event: ^SSE_Event, allocator: runtime.Allocator) -> (bool, SSE_Error) {
+    assert(r != nil)
+    assert(event != nil)
+    assert(allocator.procedure != nil)
+
+    temp := TEMP_ALLOCATOR_GUARD(allocator)
+
+    // We assume that this is non-blocking, but that is currently not true
+    read, read_err := _sse_update_buffer(r)
+    if read_err != .EOF {
+        return false, read_err
+    }
+
+    for {
+        line, err := _sse_consume_next_line(r, temp)
+        switch err {
+        case .Newline_Not_Found:
+            // We can not do anything now
+            if read_err == .EOF {
+                return false, .Unexpected_EOF
+            }
+
+            // This is only an error, if the buffer is already full
+            if _sse_buffer_is_full(r) {
+                return false, .Buffer_Full
+            }
+
+            // nothing to process
+            assert(read_err == nil)
+            return false, nil
+        case .Invalid_Utf8:
+            return false, err
+        case .None: // continue, found line
+        }
+
+        if line == "" {
+            return true, read_err
+        }
+
+        field, value: string
+
+        colon_search := ":"
+        colon := strings.index(line, colon_search)
+        switch {
+        case colon < 0:
+            field = line
+        case colon == 0:
+            continue
+        case:
+            field = line[:colon]
+            value = line[colon+len(colon_search):]
+        }
+
+        if len(value) > 0 && value[0] == ' ' {
+            value = value[1:]
+        }
+
+        sw: switch field {
+        case "event":
+            event.event = strings.clone(value, allocator)
+        case "data":
+            event.data = strings.concatenate({ event.data, value, "\n" }, allocator = allocator)
+        case "id":
+            if strings.index(value, "\x00") < 0 {
+                event.id = strings.clone(value, allocator)
+            }
+        case "retry":
+            for r in value {
+                if '0' <= r && r <= '9' {
+                    continue
+                }
+
+                break sw
+            }
+
+            event.retry = strconv.parse_int(value, 10) or_break sw
+        }
+    }
 }
 
 // sse_next_event :: proc(r: ^SSE_Reader($B), allocator: runtime.Allocator) -> SSE_Error {
