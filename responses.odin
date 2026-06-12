@@ -84,7 +84,7 @@ response_create :: proc(auth: ^http.Headers, url: string, session_id: string, in
     body_reader: strings.Reader
     strings.reader_init(&body_reader, plain)
 
-    sse_init(&reader, strings.reader_to_stream(&body_reader))
+    sse_init(&reader, make([]byte, runtime.Kilobyte * 32, allocator = temp), strings.reader_to_stream(&body_reader))
 
     event: SSE_Event
 
@@ -92,9 +92,9 @@ response_create :: proc(auth: ^http.Headers, url: string, session_id: string, in
     sse_err: SSE_Error
     for dispatched, sse_err = sse_progress(&reader, &event, temp); sse_err == nil; dispatched, sse_err = sse_progress(&reader, &event, temp) {
         if dispatched {
-            log.infof("event: %v", event.event)
+            log.infof("event(%v, data=%v)", event.event, strings.trim_right_space(event.data))
         }
     }
 
-    log.infof("%v\nsse_err: %v", plain, sse_err)
+    // log.infof("%v\nsse_err: %v", plain, sse_err)
 }

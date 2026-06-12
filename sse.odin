@@ -312,8 +312,9 @@ Returns:
 */
 sse_init :: proc(r: ^SSE_Reader, buf: []byte, reader: io.Reader) -> SSE_Error {
     assert(r != nil)
+    assert(len(buf) > 0)
 
-    r^ = { reader = reader }
+    r^ = { reader = reader, buffer = buf }
     read, err := _sse_update_buffer(r)
     if !(err == .EOF && read > 0) && err != nil {
         return err
@@ -344,11 +345,16 @@ SSE_Test :: struct {
     sse_r:  SSE_Reader,
 }
 
-@(private="file")
+@(private="file", deferred_in=sse_test_fini)
 sse_test_init :: proc(sse_test: ^SSE_Test, buffer_size: int, s: string) -> SSE_Error {
     strings.reader_init(&sse_test.r, s)
     sse_test.stream = strings.reader_to_stream(&sse_test.r)
-    return sse_init(&sse_test.sse_r, make([]byte, buffer_size), sse_test.stream)
+    return sse_init(&sse_test.sse_r, make([]byte, buffer_size, context.allocator), sse_test.stream)
+}
+
+@(private="file")
+sse_test_fini :: proc(sse_test: ^SSE_Test, buffer_size: int, s: string) {
+    delete(sse_test.sse_r.buffer, context.allocator)
 }
 
 @test
@@ -360,22 +366,22 @@ test_init_bom :: proc(t: ^testing.T) {
 
 @test
 test_init_no_bom :: proc(t: ^testing.T) {
-    test: SSE_Test(20)
-    testing.expect(t, sse_test_init(&test, "hi") == nil)
+    test: SSE_Test
+    testing.expect(t, sse_test_init(&test, 20, "hi") == nil)
     testing.expect(t, test.sse_r.buffer_len == 2)
 }
 
 @test
 test_init_invalid_utf8 :: proc(t: ^testing.T) {
-    test: SSE_Test(20)
-    testing.expect_value(t, sse_test_init(&test, "\xff \xff"), SSE_General_Error.Invalid_Utf8)
+    test: SSE_Test
+    testing.expect_value(t, sse_test_init(&test, 20, "\xff \xff"), SSE_General_Error.Invalid_Utf8)
     testing.expect_value(t, test.sse_r.buffer_len, 3)
 }
 
 @test
 test_read_event :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
-    testing.expect_value(t, sse_test_init(&test, "event: hi\r\n\r\n"), nil)
+    test: SSE_Test
+    testing.expect_value(t, sse_test_init(&test, 32, "event: hi\r\n\r\n"), nil)
     testing.expect_value(t, test.sse_r.buffer_len, 13)
     temp := TEMP_ALLOCATOR_GUARD()
     event: SSE_Event
@@ -390,8 +396,8 @@ test_read_event :: proc(t: ^testing.T) {
 
 @test
 test_read_event2 :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
-    testing.expect_value(t, sse_test_init(&test, "event: hi\r\n\r\nevent: hi2\r\n\r\n"), nil)
+    test: SSE_Test
+    testing.expect_value(t, sse_test_init(&test, 32, "event: hi\r\n\r\nevent: hi2\r\n\r\n"), nil)
     testing.expect_value(t, test.sse_r.buffer_len, 27)
     temp := TEMP_ALLOCATOR_GUARD()
     event: SSE_Event
@@ -414,8 +420,8 @@ test_read_event2 :: proc(t: ^testing.T) {
 
 @test
 test_read_event_missing_empty :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
-    testing.expect_value(t, sse_test_init(&test, "event: hi\r\n"), nil)
+    test: SSE_Test
+    testing.expect_value(t, sse_test_init(&test, 32, "event: hi\r\n"), nil)
     testing.expect_value(t, test.sse_r.buffer_len, 11)
     temp := TEMP_ALLOCATOR_GUARD()
     event: SSE_Event
@@ -426,8 +432,8 @@ test_read_event_missing_empty :: proc(t: ^testing.T) {
 
 @test
 test_read_event_early_eof :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
-    testing.expect_value(t, sse_test_init(&test, "event:"), nil)
+    test: SSE_Test
+    testing.expect_value(t, sse_test_init(&test, 32, "event:"), nil)
     testing.expect_value(t, test.sse_r.buffer_len, 6)
     temp := TEMP_ALLOCATOR_GUARD()
     event: SSE_Event
@@ -438,8 +444,8 @@ test_read_event_early_eof :: proc(t: ^testing.T) {
 
 @test
 test_read_event_full_buffer :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
-    testing.expect_value(t, sse_test_init(&test, "event: hi, how are, hope you are doing well\n\r\n\r"), nil)
+    test: SSE_Test
+    testing.expect_value(t, sse_test_init(&test, 32, "event: hi, how are, hope you are doing well\n\r\n\r"), nil)
     testing.expect_value(t, test.sse_r.buffer_len, 32)
     temp := TEMP_ALLOCATOR_GUARD()
     event: SSE_Event
@@ -450,11 +456,12 @@ test_read_event_full_buffer :: proc(t: ^testing.T) {
 
 @test
 test_read_event_across_buffer :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
+    test: SSE_Test
     testing.expect_value(
         t,
         sse_test_init(
             &test,
+            32,
             "event: hi\r\ndata: yolo how are you, i am\r\n\r\n",
         ),
         nil
@@ -476,11 +483,12 @@ test_read_event_across_buffer :: proc(t: ^testing.T) {
 
 @test
 test_read_event_across_buffer_new_lines :: proc(t: ^testing.T) {
-    test: SSE_Test(32)
+    test: SSE_Test
     testing.expect_value(
         t,
         sse_test_init(
             &test,
+            32,
             "event: hi\rdata: yolo how are you, i am\r\r\n",
         ),
         nil
