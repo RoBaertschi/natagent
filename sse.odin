@@ -203,22 +203,22 @@ Inputs:
 - event: a in-out pointer to a WIP event
 - allocator: allocator to allocate the fields inside event with
 
- **Usage**
- - the passed in event is used to stream the current event into
- - true is returned when said event is dispatched and ready to be used
- - said event must be reset manually by the user
- - it is recommended to copy the contents of the event out of the event itself and reset it for reuse
+**Usage**
+- the passed in event is used to stream the current event into
+- true is returned when said event is dispatched and ready to be used
+- said event must be reset manually by the user
+- it is recommended to copy the contents of the event out of the event itself and reset it for reuse
 
- WARN: The passed in events field are allocated with `allocator`, as long as you intend to
- use this function, those fields should not be freed, ideally you wait until an event
- is dispatched, copy the fields out into a more permanent allocator and then reset `allocator`
+WARN: The passed in events field are allocated with `allocator`, as long as you intend to
+      use this function, those fields should not be freed, ideally you wait until an event
+      is dispatched, copy the fields out into a more permanent allocator and then reset `allocator`
 
- NOTE: `event.data` will always end with an `\n`, if you don't want that, strip it off
+NOTE: `event.data` will always end with an `\n`, if you don't want that, strip it off
 
- Returns:
- - `bool` is true, if the event is dispatched (finished) and ready to use
- - `SSE_Error` unrecoverable error, either an `io.Error` or `SSE_General_Error.Invalid_Utf8`
- */
+Returns:
+- `bool` is true, if the event is dispatched (finished) and ready to use
+- `SSE_Error` unrecoverable error, either an `io.Error` or `SSE_General_Error.Invalid_Utf8`
+*/
 sse_progress :: proc(r: ^SSE_Reader, event: ^SSE_Event, allocator: runtime.Allocator) -> (bool, SSE_Error) {
 	assert(r != nil)
 	assert(event != nil)
@@ -299,7 +299,20 @@ sse_progress :: proc(r: ^SSE_Reader, event: ^SSE_Event, allocator: runtime.Alloc
 	}
 }
 
+/*
+Resize the buffer inside the `SSE_Reader`.
+
+Inputs:
+- r: A valid `SSE_Reader`
+- buf: A buffer large enough to hold the current `r.buffer_len`
+
+This function copies the old data into the new buffer and then replaces the old buffer with the new one.
+
+Returns:
+- `[]byte` the old buffer
+*/
 sse_resize :: proc(r: ^SSE_Reader, buf: []byte) -> []byte {
+	assert(r != nil)
 	// NOTE: Dataloss is not allowed, generally making the buffer makes rarely sense
 	assert(r.buffer_len <= len(buf))
 

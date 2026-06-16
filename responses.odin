@@ -90,9 +90,40 @@ response_create :: proc(auth: ^http.Headers, url: string, session_id: string, in
 
 	dispatched: bool
 	sse_err: SSE_Error
-	for dispatched, sse_err = sse_progress(&reader, &event, temp); sse_err == nil; dispatched, sse_err = sse_progress(&reader, &event, temp) {
+	for dispatched, sse_err = sse_progress(&reader, &event, temp); !(sse_err == nil || sse_err == .EOF); dispatched, sse_err = sse_progress(&reader, &event, temp) {
 		if dispatched {
-			log.infof("event(%v, data=%v)", event.event, strings.trim_right_space(event.data))
+			Event :: struct {
+				type:            string,
+				sequence_number: Maybe(int),
+				response:        json.Object,
+			}
+
+			ev: Event
+			json_err := json.unmarshal_string(event.data, &ev, allocator = temp)
+			if json_err != nil {
+				log.errorf("could not unmarshal streaming response: %v", json_err)
+				continue
+			}
+
+			fmt.assertf(ev.type == event.event, "%q != %q: %v", ev.type, event.event, event.data)
+			switch ev.type {
+			case "response.completed":
+				log.info(event.event, ev, "\n\n")
+			case "response.failed":
+				log.info(event.event,  ev, "\n\n")
+			case "response.incomplete":
+				log.info(event.event, ev, "\n\n")
+			case "error":
+				log.info(event.event, ev, "\n\n")
+			}
+
+			// log.infof("event(%v, data=%v)", event.event, strings.trim_right_space(event.data))
+
+			event = {}
+		}
+
+		if sse_err == .EOF {
+			break
 		}
 	}
 
